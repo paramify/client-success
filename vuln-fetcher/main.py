@@ -220,6 +220,149 @@ def import_scan_interactive(integration: NessusParamifyIntegration):
         sys.exit(1)
 
 
+def import_from_local_file_interactive():
+    """Interactive local file import."""
+    print("\n" + "=" * 70)
+    print("  IMPORT FROM LOCAL FILE")
+    print("=" * 70 + "\n")
+
+    # Use macOS file picker if available, otherwise prompt for path
+    file_path = None
+
+    try:
+        import subprocess
+        script = '''
+        set fileTypes to {"nessus", "csv", "public.comma-separated-values-text"}
+        set selectedFile to choose file with prompt "Select a scan file (.nessus or .csv)" of type fileTypes
+        return POSIX path of selectedFile
+        '''
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            file_path = result.stdout.strip()
+    except Exception:
+        pass  # Fall back to manual input
+
+    if not file_path:
+        file_path = input("Enter the path to the scan file (.nessus or .csv): ").strip()
+        # Handle drag-and-drop paths with escaped spaces
+        file_path = file_path.replace("\\ ", " ").strip("'\"")
+
+    if not file_path:
+        print("✗ No file specified.")
+        sys.exit(1)
+
+    # Validate file exists and has correct extension
+    from pathlib import Path
+    path = Path(file_path)
+
+    if not path.exists():
+        print(f"✗ File not found: {file_path}")
+        sys.exit(1)
+
+    if path.suffix.lower() not in ['.nessus', '.csv']:
+        print(f"✗ Invalid file type: {path.suffix}")
+        print("  Supported formats: .nessus, .csv")
+        sys.exit(1)
+
+    file_size = path.stat().st_size
+    print(f"\n✓ Selected: {path.name} ({file_size / 1024:.1f} KB)")
+
+    # Get available assessments
+    paramify_client = ParamifyClient(
+        api_key=Config.PARAMIFY_API_KEY,
+        base_url=Config.PARAMIFY_BASE_URL
+    )
+
+    try:
+        assessments = paramify_client.list_assessments()
+    except Exception as e:
+        print(f"\n✗ Error fetching assessments: {e}")
+        sys.exit(1)
+
+    if not assessments:
+        print("✗ No assessments available.")
+        sys.exit(1)
+
+    print("\n" + "=" * 70)
+    print("  SELECT PARAMIFY ASSESSMENT")
+    print("=" * 70 + "\n")
+    format_assessment_table(assessments)
+
+    # Let user select assessment
+    while True:
+        try:
+            choice = input("\nEnter the # of the assessment (or 'q' to quit): ").strip()
+            if choice.lower() == 'q':
+                print("Cancelled.")
+                sys.exit(0)
+
+            if choice.isdigit() and 1 <= int(choice) <= len(assessments):
+                assessment_id = assessments[int(choice) - 1]['id']
+                selected_assessment = assessments[int(choice) - 1]
+                break
+            else:
+                print(f"✗ Invalid choice. Please enter a number between 1 and {len(assessments)}.")
+        except (ValueError, KeyboardInterrupt):
+            print("\nCancelled.")
+            sys.exit(0)
+
+    # Ask for effective date
+    date_input = input("\nEffective date (YYYY-MM-DD) [press Enter for today]: ").strip()
+    effective_date = date_input if date_input else None
+
+    # Show summary
+    print("\n" + "=" * 70)
+    print("  IMPORT SUMMARY")
+    print("=" * 70)
+    print(f"\n  File:       {path.name}")
+    print(f"  Size:       {file_size / 1024:.1f} KB")
+    print(f"  Assessment: {selected_assessment.get('name')}")
+    print(f"  Date:       {effective_date if effective_date else 'Today'}\n")
+
+    # Confirm
+    confirm = input("Proceed with import? (y/N): ").strip().lower()
+    if confirm != 'y':
+        print("Cancelled.")
+        sys.exit(0)
+
+    print("\n⏳ Uploading to Paramify...")
+
+    try:
+        # Read file content
+        with open(path, 'rb') as f:
+            file_content = f.read()
+
+        # Upload to Paramify
+        result = paramify_client.upload_intake(
+            assessment_id=assessment_id,
+            file_content=file_content,
+            filename=path.name,
+            effective_date=effective_date
+        )
+
+        print("\n" + "=" * 70)
+        print("  ✓ IMPORT SUCCESSFUL")
+        print("=" * 70)
+
+        if result.get('artifacts'):
+            artifact = result['artifacts'][0]
+            print(f"\n  Artifact ID:   {artifact.get('id')}")
+            print(f"  File:          {artifact.get('originalFileName')}")
+            print(f"  Effective:     {artifact.get('effectiveDate', 'N/A')[:10]}")
+        print()
+
+    except Exception as e:
+        print("\n" + "=" * 70)
+        print("  ✗ IMPORT FAILED")
+        print("=" * 70)
+        print(f"\n  Error: {e}\n")
+        sys.exit(1)
+
+
 def import_from_github_interactive():
     """Interactive GitHub file import."""
     print("\n" + "=" * 70)
@@ -413,14 +556,15 @@ def unified_menu():
     print("What would you like to do?\n")
     print("  1. Import from Nessus (live scan from your Nessus instance)")
     print("  2. Import from GitHub (scan files stored in a repository)")
-    print("  3. List Nessus scans")
-    print("  4. List Paramify assessments")
-    print("  5. Exit")
+    print("  3. Import from Local File (scan file on your computer)")
+    print("  4. List Nessus scans")
+    print("  5. List Paramify assessments")
+    print("  6. Exit")
     print()
 
     while True:
         try:
-            choice = input("Enter your choice (1-5): ").strip()
+            choice = input("Enter your choice (1-6): ").strip()
 
             if choice == '1':
                 # Validate Paramify and Nessus configuration
@@ -457,6 +601,14 @@ def unified_menu():
                 break
 
             elif choice == '3':
+                # Only need Paramify credentials for local file import
+                if not Config.PARAMIFY_API_KEY:
+                    print("✗ Configuration error: PARAMIFY_API_KEY is required")
+                    sys.exit(1)
+                import_from_local_file_interactive()
+                break
+
+            elif choice == '4':
                 is_valid_nessus, missing_nessus = Config.validate_nessus()
                 if not is_valid_nessus:
                     print(f"\n✗ Configuration error: Missing Nessus credentials: {', '.join(missing_nessus)}")
@@ -478,7 +630,7 @@ def unified_menu():
                 unified_menu()
                 return
 
-            elif choice == '4':
+            elif choice == '5':
                 is_valid, missing = Config.validate()
                 if not is_valid:
                     print(f"\n✗ Configuration error: Missing Paramify credentials: {', '.join(missing)}")
@@ -498,12 +650,12 @@ def unified_menu():
                 unified_menu()
                 return
 
-            elif choice == '5':
+            elif choice == '6':
                 print("\nGoodbye!")
                 sys.exit(0)
 
             else:
-                print("✗ Invalid choice. Please enter a number between 1 and 5.")
+                print("✗ Invalid choice. Please enter a number between 1 and 6.")
 
         except (KeyboardInterrupt, EOFError):
             print("\n\nGoodbye!")
@@ -589,6 +741,9 @@ Examples:
     # Import from GitHub command
     subparsers.add_parser('import-github', help='Import a .nessus or .csv file from a GitHub repository')
 
+    # Import from local file command
+    subparsers.add_parser('import-file', help='Import a .nessus or .csv file from your computer')
+
     args = parser.parse_args()
 
     # Setup logging (hide it for cleaner output)
@@ -606,6 +761,12 @@ Examples:
             print("✗ Configuration error: PARAMIFY_API_KEY is required")
             sys.exit(1)
         import_from_github_interactive()
+    elif args.command == 'import-file':
+        # Validate that we have Paramify credentials
+        if not Config.PARAMIFY_API_KEY:
+            print("✗ Configuration error: PARAMIFY_API_KEY is required")
+            sys.exit(1)
+        import_from_local_file_interactive()
     else:
         # Validate Paramify configuration (required for all commands)
         is_valid, missing = Config.validate()

@@ -1,0 +1,26 @@
+[
+  {
+    "name": "User Access Review",
+    "referenceId": "EVD-001",
+    "description": "Quarterly review of user access permissions",
+    "instructions": "Review all user accounts and verify access levels",
+    "remarks": "Special attention to new department users",
+    "automated": true
+  },
+  {
+    "name": "Security Policy Update",
+    "referenceId": "EVD-002",
+    "description": "Annual security policy review and updates",
+    "instructions": "Review and update all security policies",
+    "remarks": "Focus on remote work policies",
+    "automated": false
+  },
+  {
+    "name": "Vulnerability Assessment",
+    "referenceId": "EVD-003",
+    "description": "Q1 2024 vulnerability scan results",
+    "instructions": "Document all identified vulnerabilities and remediation plans",
+    "remarks": "High priority items flagged",
+    "automated": true
+  }
+]

@@ -1,0 +1,6 @@
+name,reference_id,description,instructions,remarks,automated
+User Access Review,EVD-001,Quarterly review of user access permissions,Review all user accounts and verify access levels,Special attention to new department users,true
+Security Policy Update,EVD-002,Annual security policy review and updates,Review and update all security policies,Focus on remote work policies,false
+Vulnerability Assessment,EVD-003,Q1 2024 vulnerability scan results,Document all identified vulnerabilities and remediation plans,High priority items flagged,true
+
+test123,EVD-004,this is a test,this is a test

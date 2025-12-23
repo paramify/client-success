@@ -65,15 +65,16 @@ def format_assessment_table(assessments: List[Dict]) -> None:
         print("No assessments found.")
         return
 
-    print(f"{'#':<4} {'Name':<35} {'Type':<18}")
-    print("-" * 70)
+    print(f"{'#':<4} {'Name':<30} {'Type':<16} {'Assessment ID'}")
+    print("-" * 90)
 
     for idx, assessment in enumerate(assessments, 1):
-        name = assessment.get('name', 'Unknown')[:33]
+        name = assessment.get('name', 'Unknown')[:28]
         assessment_type = assessment.get('type', 'UNKNOWN')
-        type_display = assessment_type.replace('_', ' ').title()
+        type_display = assessment_type.replace('_', ' ').title()[:14]
+        assessment_id = assessment.get('id', 'N/A')
 
-        print(f"{idx:<4} {name:<35} {type_display:<18}")
+        print(f"{idx:<4} {name:<30} {type_display:<16} {assessment_id}")
 
 
 def list_assessments(integration: NessusParamifyIntegration, return_assessments: bool = False):
@@ -87,17 +88,11 @@ def list_assessments(integration: NessusParamifyIntegration, return_assessments:
     if return_assessments:
         return assessments
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 90)
     print("  PARAMIFY ASSESSMENTS")
-    print("=" * 70 + "\n")
+    print("=" * 90 + "\n")
 
     format_assessment_table(assessments)
-    print()
-
-    # Show assessment IDs below for easy copy-paste
-    print("Assessment IDs:")
-    for idx, assessment in enumerate(assessments, 1):
-        print(f"  {idx}. {assessment.get('id')}")
     print()
 
 
@@ -547,6 +542,108 @@ def import_from_github_interactive():
         sys.exit(1)
 
 
+def update_settings_interactive():
+    """Interactive settings update."""
+    print("\n" + "=" * 70)
+    print("  UPDATE API SETTINGS")
+    print("=" * 70 + "\n")
+
+    # Show current settings (masked)
+    def mask_key(key: str) -> str:
+        if not key:
+            return "(not set)"
+        if len(key) <= 8:
+            return "*" * len(key)
+        return key[:4] + "*" * (len(key) - 8) + key[-4:]
+
+    print("Current settings:")
+    print(f"  1. Paramify API Key:    {mask_key(Config.PARAMIFY_API_KEY)}")
+    print(f"  2. Paramify Base URL:   {Config.PARAMIFY_BASE_URL}")
+    print(f"  3. Nessus URL:          {Config.NESSUS_URL}")
+    print(f"  4. Nessus Access Key:   {mask_key(Config.NESSUS_ACCESS_KEY)}")
+    print(f"  5. Nessus Secret Key:   {mask_key(Config.NESSUS_SECRET_KEY)}")
+    print()
+    print("  6. Back to main menu")
+    print()
+
+    while True:
+        try:
+            choice = input("Select setting to update (1-6): ").strip()
+
+            if choice == '1':
+                current = "(not set)" if not Config.PARAMIFY_API_KEY else "current value exists"
+                new_value = input(f"Enter new Paramify API Key ({current}): ").strip()
+                if new_value:
+                    Config.save_to_env(PARAMIFY_API_KEY=new_value)
+                    print("✓ Paramify API Key updated")
+                else:
+                    print("✗ No change (empty input)")
+
+            elif choice == '2':
+                print("\nSelect Paramify environment:")
+                print("  1. Production  (app.paramify.com)")
+                print("  2. Demo        (demo.paramify.com)")
+                print("  3. Staging     (stage.paramify.com)")
+                print("  4. Cancel")
+                env_choice = input("\nEnter choice (1-4): ").strip()
+
+                url_map = {
+                    '1': 'https://app.paramify.com/api/v0',
+                    '2': 'https://demo.paramify.com/api/v0',
+                    '3': 'https://stage.paramify.com/api/v0'
+                }
+
+                if env_choice in url_map:
+                    Config.save_to_env(PARAMIFY_BASE_URL=url_map[env_choice])
+                    print(f"✓ Paramify Base URL updated to {url_map[env_choice]}")
+                elif env_choice == '4':
+                    print("Cancelled")
+                else:
+                    print("✗ Invalid choice")
+
+            elif choice == '3':
+                new_value = input(f"Enter new Nessus URL [{Config.NESSUS_URL}]: ").strip()
+                if new_value:
+                    Config.save_to_env(NESSUS_URL=new_value)
+                    print("✓ Nessus URL updated")
+                else:
+                    print("✗ No change (empty input)")
+
+            elif choice == '4':
+                current = "(not set)" if not Config.NESSUS_ACCESS_KEY else "current value exists"
+                new_value = input(f"Enter new Nessus Access Key ({current}): ").strip()
+                if new_value:
+                    Config.save_to_env(NESSUS_ACCESS_KEY=new_value)
+                    print("✓ Nessus Access Key updated")
+                else:
+                    print("✗ No change (empty input)")
+
+            elif choice == '5':
+                current = "(not set)" if not Config.NESSUS_SECRET_KEY else "current value exists"
+                new_value = input(f"Enter new Nessus Secret Key ({current}): ").strip()
+                if new_value:
+                    Config.save_to_env(NESSUS_SECRET_KEY=new_value)
+                    print("✓ Nessus Secret Key updated")
+                else:
+                    print("✗ No change (empty input)")
+
+            elif choice == '6':
+                return
+
+            else:
+                print("✗ Invalid choice. Please enter a number between 1 and 6.")
+                continue
+
+            # After updating, show menu again
+            print()
+            update_settings_interactive()
+            return
+
+        except (KeyboardInterrupt, EOFError):
+            print("\n")
+            return
+
+
 def unified_menu():
     """Unified menu for all import options."""
     print("\n" + "=" * 70)
@@ -559,12 +656,13 @@ def unified_menu():
     print("  3. Import from Local File (scan file on your computer)")
     print("  4. List Nessus scans")
     print("  5. List Paramify assessments")
-    print("  6. Exit")
+    print("  6. Update API settings")
+    print("  7. Exit")
     print()
 
     while True:
         try:
-            choice = input("Enter your choice (1-6): ").strip()
+            choice = input("Enter your choice (1-7): ").strip()
 
             if choice == '1':
                 # Validate Paramify and Nessus configuration
@@ -651,11 +749,17 @@ def unified_menu():
                 return
 
             elif choice == '6':
+                update_settings_interactive()
+                # Return to menu after updating settings
+                unified_menu()
+                return
+
+            elif choice == '7':
                 print("\nGoodbye!")
                 sys.exit(0)
 
             else:
-                print("✗ Invalid choice. Please enter a number between 1 and 6.")
+                print("✗ Invalid choice. Please enter a number between 1 and 7.")
 
         except (KeyboardInterrupt, EOFError):
             print("\n\nGoodbye!")
@@ -744,6 +848,9 @@ Examples:
     # Import from local file command
     subparsers.add_parser('import-file', help='Import a .nessus or .csv file from your computer')
 
+    # Settings command
+    subparsers.add_parser('settings', help='Update API keys and URLs')
+
     args = parser.parse_args()
 
     # Setup logging (hide it for cleaner output)
@@ -767,6 +874,8 @@ Examples:
             print("✗ Configuration error: PARAMIFY_API_KEY is required")
             sys.exit(1)
         import_from_local_file_interactive()
+    elif args.command == 'settings':
+        update_settings_interactive()
     else:
         # Validate Paramify configuration (required for all commands)
         is_valid, missing = Config.validate()

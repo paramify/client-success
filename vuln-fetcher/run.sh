@@ -1,30 +1,31 @@
 #!/bin/bash
 # Wrapper script to run the Paramify Vuln-Fetcher
 
+# Get the directory where this script is located
+cd "$(dirname "$0")"
+
 # Colors for output
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
-# Check if setup is needed
-if [ ! -d "venv" ] || [ ! -f ".env" ]; then
+# Check if setup is needed (venv required, .env will be created if missing)
+if [ ! -d "venv" ]; then
     echo -e "${YELLOW}⚠ Setup required!${NC}"
     echo ""
-
-    if [ ! -d "venv" ]; then
-        echo "Virtual environment not found."
-    fi
-
-    if [ ! -f ".env" ]; then
-        echo "Configuration file (.env) not found."
-    fi
-
+    echo "Virtual environment not found."
     echo ""
     echo "Please run the installation script first:"
     echo ""
     echo -e "  ${YELLOW}./install.sh${NC}"
     echo ""
     exit 1
+fi
+
+# Create .env file if it doesn't exist (can be configured via menu option 6)
+if [ ! -f ".env" ]; then
+    touch .env
 fi
 
 # Activate virtual environment
@@ -46,21 +47,10 @@ if ! python3 -c "import requests, dotenv, urllib3" 2>/dev/null; then
     exit 1
 fi
 
-# Check if .env has required values (only Paramify API key is required)
-if ! grep -q "PARAMIFY_API_KEY=." .env 2>/dev/null; then
-    echo -e "${YELLOW}⚠ Configuration incomplete${NC}"
-    echo ""
-    echo "Your .env file is missing the required Paramify API key."
-    echo "Please run the installation script to configure:"
-    echo ""
-    echo -e "  ${YELLOW}./install.sh${NC}"
-    echo ""
-    echo "Or manually edit the .env file and add your PARAMIFY_API_KEY."
-    echo ""
-    exit 1
-fi
-
 # All checks passed - run the tool
+# (API keys can be configured via menu option 6 if not set)
+echo -e "${GREEN}✓ Setup verified${NC}"
+echo ""
 if [ $# -eq 0 ]; then
     python3 main.py
 else

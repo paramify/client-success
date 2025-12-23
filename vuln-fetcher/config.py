@@ -2,11 +2,13 @@
 Configuration management for the Nessus-Paramify integration.
 """
 import os
+from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+ENV_FILE = Path(__file__).parent / '.env'
+load_dotenv(ENV_FILE)
 
 
 class Config:
@@ -76,3 +78,44 @@ class Config:
             'CRITICAL': logging.CRITICAL
         }
         return level_map.get(cls.LOG_LEVEL.upper(), logging.INFO)
+
+    @classmethod
+    def reload(cls):
+        """Reload configuration from .env file."""
+        load_dotenv(ENV_FILE, override=True)
+        cls.PARAMIFY_API_KEY = os.getenv('PARAMIFY_API_KEY', '')
+        cls.PARAMIFY_BASE_URL = os.getenv('PARAMIFY_BASE_URL', 'https://demo.paramify.com/api/v0')
+        cls.NESSUS_URL = os.getenv('NESSUS_URL', 'https://localhost:8834')
+        cls.NESSUS_ACCESS_KEY = os.getenv('NESSUS_ACCESS_KEY', '')
+        cls.NESSUS_SECRET_KEY = os.getenv('NESSUS_SECRET_KEY', '')
+
+    @classmethod
+    def save_to_env(cls, **kwargs):
+        """
+        Save configuration values to .env file.
+
+        Args:
+            **kwargs: Key-value pairs to save (e.g., PARAMIFY_API_KEY='xxx')
+        """
+        # Read existing .env content
+        env_content = {}
+        if ENV_FILE.exists():
+            with open(ENV_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        env_content[key.strip()] = value.strip()
+
+        # Update with new values
+        for key, value in kwargs.items():
+            if value is not None:
+                env_content[key] = value
+
+        # Write back to .env
+        with open(ENV_FILE, 'w') as f:
+            for key, value in env_content.items():
+                f.write(f"{key}={value}\n")
+
+        # Reload configuration
+        cls.reload()

@@ -5,6 +5,9 @@
 # Get the directory where this script is located
 cd "$(dirname "$0")"
 
+# Resize terminal window to be wider (100 columns x 30 rows)
+printf '\e[8;30;100t'
+
 # Colors for output
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
@@ -90,33 +93,14 @@ if ! python3 -c "import requests, dotenv, urllib3" 2>/dev/null; then
     exit 1
 fi
 
-# Check if .env has required values (only Paramify API key is required)
-if ! grep -q "PARAMIFY_API_KEY=." .env 2>/dev/null; then
-    echo -e "${YELLOW}⚠ Configuration incomplete${NC}"
-    echo ""
-    echo "Your .env file is missing the required Paramify API key."
-    echo ""
-    read -p "Run installer to configure? (Y/n): " CONFIG
-
-    if [[ ! $CONFIG =~ ^[Nn]$ ]]; then
-        ./install.sh
-    else
-        echo ""
-        read -p "Press Enter to exit..."
-    fi
-    exit 1
-fi
-
 # All checks passed - run the tool
+# (API keys can be configured via menu option 6 if not set)
 echo -e "${GREEN}✓ Setup verified${NC}"
 echo ""
 python3 main.py
 
-# Keep terminal open after execution
-echo ""
-echo -e "${BLUE}======================================================================${NC}"
-read -p "Press Enter to close this window..."
-
-# Close the Terminal window (macOS specific)
-osascript -e 'tell application "Terminal" to close (every window whose name contains "run.command")' > /dev/null 2>&1 &
+# Close the Terminal window after a brief delay (macOS specific)
+# The delay ensures the close command runs after this script exits
+(sleep 0.5 && osascript -e 'tell application "Terminal" to close front window' 2>/dev/null) &
+disown
 exit 0

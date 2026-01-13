@@ -21,8 +21,54 @@ from paramify_client import (
     error,
     warning,
     info,
-    bold
+    bold,
+    read_csv_file
 )
+
+
+def resolve_evidence_id(client, search_term: str) -> tuple:
+    """
+    Resolve an evidence name or ID to an actual evidence ID.
+
+    Args:
+        client: ParamifyClient instance
+        search_term: Either an evidence ID (UUID) or evidence name
+
+    Returns:
+        Tuple of (evidence_id, evidence_name) or (None, None) if not found
+    """
+    # Check if it looks like a UUID (evidence ID)
+    is_uuid = len(search_term) == 36 and search_term.count('-') == 4
+
+    if is_uuid:
+        # Try to fetch directly by ID
+        try:
+            evidence = client.get_evidence(search_term)
+            return evidence.get('id'), evidence.get('name')
+        except APIError:
+            return None, None
+
+    # Otherwise, search by name
+    try:
+        all_evidence = client.get_all_evidence()
+    except APIError:
+        return None, None
+
+    # Exact match first (case-insensitive)
+    for ev in all_evidence:
+        if ev.get('name', '').lower() == search_term.lower():
+            return ev.get('id'), ev.get('name')
+
+    # Partial match (case-insensitive) - only if exactly one match
+    matches = []
+    for ev in all_evidence:
+        if search_term.lower() in ev.get('name', '').lower():
+            matches.append(ev)
+
+    if len(matches) == 1:
+        return matches[0].get('id'), matches[0].get('name')
+
+    return None, None
 
 
 def create_evidence_from_cli(args) -> dict:
@@ -71,6 +117,18 @@ Examples:
 
   # Export all evidence to JSON
   python main.py --export evidence_backup.json
+
+  # Associate evidence with a single control implementation (by ID or name)
+  python main.py --associate <evidence-id-or-name> --subject-id <control-impl-id>
+
+  # Associate evidence with multiple control implementations
+  python main.py --associate "User Access Review" --subject-id <id1> <id2> <id3>
+
+  # Associate evidence with multiple solution capabilities
+  python main.py --associate <evidence-id> --subject-id <id1> <id2> --subject-type SOLUTION_CAPABILITY
+
+  # Bulk associate from CSV file (columns: evidence_id or evidence_name, subject_id, subject_type)
+  python main.py --associate-file associations.csv
         """
     )
 
@@ -86,6 +144,32 @@ Examples:
         "--export", "-e",
         type=str,
         help="Export all evidence to file (CSV or JSON based on extension)"
+    )
+
+    # Associate evidence
+    parser.add_argument(
+        "--associate",
+        type=str,
+        metavar="EVIDENCE",
+        help="Associate evidence with subject(s) - can be ID or name (use with --subject-id and --subject-type)"
+    )
+    parser.add_argument(
+        "--subject-id",
+        type=str,
+        nargs='+',
+        help="ID(s) of the subject(s) to associate with (space-separated for multiple)"
+    )
+    parser.add_argument(
+        "--subject-type",
+        type=str,
+        choices=["CONTROL_IMPLEMENTATION", "SOLUTION_CAPABILITY"],
+        default="CONTROL_IMPLEMENTATION",
+        help="Type of subject (default: CONTROL_IMPLEMENTATION)"
+    )
+    parser.add_argument(
+        "--associate-file",
+        type=str,
+        help="CSV file with associations (columns: evidence_id or evidence_name, subject_id, subject_type)"
     )
 
     # Command-line input
@@ -192,6 +276,182 @@ Examples:
         except Exception as e:
             print(error(f"Export failed: {e}"), file=sys.stderr)
             sys.exit(1)
+
+    # Handle single/multiple association
+    if args.associate:
+        if not args.subject_id:
+            print(error("Error: --subject-id is required when using --associate"), file=sys.stderr)
+            sys.exit(1)
+
+        # Resolve evidence ID (supports both ID and name)
+        print(info(f"Looking up evidence: {args.associate}..."))
+        evidence_id, evidence_name = resolve_evidence_id(client, args.associate)
+
+        if not evidence_id:
+            print(error(f"Evidence not found: {args.associate}"), file=sys.stderr)
+            sys.exit(1)
+
+        print(success(f"Found evidence: {evidence_name} (ID: {evidence_id[:8]}...)"))
+
+        subject_ids = args.subject_id  # Already a list due to nargs='+'
+        total = len(subject_ids)
+
+        print(info(f"Associating with {total} {args.subject_type}(s)..."))
+
+        if args.dry_run:
+            print(warning("\n[DRY RUN MODE - No changes will be made]\n"))
+            for idx, subject_id in enumerate(subject_ids, 1):
+                print(f"  [{idx}/{total}] Would associate: {evidence_name} -> {args.subject_type} {subject_id}")
+            print(f"\n{bold('Summary:')} {total} association(s) would be created")
+            sys.exit(0)
+
+        created = 0
+        failed = 0
+        failed_items = []
+
+        for idx, subject_id in enumerate(subject_ids, 1):
+            try:
+                result = client.associate_evidence(
+                    evidence_id=evidence_id,
+                    subject_id=subject_id,
+                    subject_type=args.subject_type
+                )
+                created += 1
+                if args.verbose:
+                    print(success(f"  [{idx}/{total}] Associated: {evidence_name} -> {args.subject_type} {subject_id}"))
+            except (ValidationError, APIError) as e:
+                failed += 1
+                failed_items.append({"subject_id": subject_id, "error": str(e)})
+                if args.verbose:
+                    print(error(f"  [{idx}/{total}] Failed: {subject_id} - {e}"))
+
+        # Summary
+        if total > 1 or failed > 0:
+            print()
+            print(bold("=" * 50))
+            print(bold("Association Summary:"))
+            print(f"  Total:   {total}")
+            print(f"  Created: {success(str(created))}")
+            if failed > 0:
+                print(f"  Failed:  {error(str(failed))}")
+            print(bold("=" * 50))
+
+            if failed_items:
+                print(error("\nFailed items:"))
+                for item in failed_items:
+                    print(f"  - {item['subject_id']}: {item['error']}")
+        else:
+            print(success(f"Successfully associated evidence!"))
+
+        sys.exit(0 if failed == 0 else 1)
+
+    # Handle bulk associations from file
+    if args.associate_file:
+        print(info(f"Reading associations from: {args.associate_file}"))
+
+        try:
+            associations = read_csv_file(Path(args.associate_file))
+            print(f"Found {bold(str(len(associations)))} association(s) to process")
+        except Exception as e:
+            print(error(f"Error reading file: {e}"), file=sys.stderr)
+            sys.exit(1)
+
+        if not associations:
+            print(warning("No associations to process"))
+            sys.exit(0)
+
+        # Pre-fetch all evidence for name lookups
+        print(info("Fetching evidence records for name lookups..."))
+        try:
+            all_evidence = client.get_all_evidence()
+            evidence_by_name = {ev.get('name', '').lower(): ev for ev in all_evidence}
+            evidence_by_id = {ev.get('id'): ev for ev in all_evidence}
+            print(f"Found {len(all_evidence)} evidence record(s)")
+        except APIError as e:
+            print(error(f"Failed to fetch evidence: {e}"), file=sys.stderr)
+            sys.exit(1)
+
+        # Dry run for associations
+        if args.dry_run:
+            print(warning("\n[DRY RUN MODE - No changes will be made]\n"))
+            for idx, assoc in enumerate(associations, 1):
+                ev_id = assoc.get("evidence_id", assoc.get("evidenceid"))
+                ev_name = assoc.get("evidence_name", assoc.get("evidencename"))
+                subject_id = assoc.get("subject_id", assoc.get("subjectid", "N/A"))
+                subject_type = assoc.get("subject_type", assoc.get("subjecttype", "CONTROL_IMPLEMENTATION"))
+                display = ev_name or ev_id or "N/A"
+                print(f"  [{idx}/{len(associations)}] Would associate: {display} -> {subject_type} {subject_id}")
+            print(f"\n{bold('Summary:')} {len(associations)} association(s) would be processed")
+            sys.exit(0)
+
+        # Process associations
+        created = 0
+        failed = 0
+        failed_items = []
+
+        for idx, assoc in enumerate(associations, 1):
+            # Support both evidence_id and evidence_name columns
+            evidence_id = assoc.get("evidence_id", assoc.get("evidenceid"))
+            evidence_name = assoc.get("evidence_name", assoc.get("evidencename"))
+            subject_id = assoc.get("subject_id", assoc.get("subjectid"))
+            subject_type = assoc.get("subject_type", assoc.get("subjecttype", "CONTROL_IMPLEMENTATION"))
+
+            # Resolve evidence name to ID if needed
+            if not evidence_id and evidence_name:
+                # Look up by name
+                ev = evidence_by_name.get(evidence_name.lower())
+                if ev:
+                    evidence_id = ev.get('id')
+                else:
+                    # Try partial match
+                    for name, ev in evidence_by_name.items():
+                        if evidence_name.lower() in name:
+                            evidence_id = ev.get('id')
+                            break
+            elif evidence_id and evidence_id not in evidence_by_id:
+                # Check if evidence_id is actually a name
+                ev = evidence_by_name.get(evidence_id.lower())
+                if ev:
+                    evidence_id = ev.get('id')
+
+            if not evidence_id or not subject_id:
+                failed += 1
+                failed_items.append({"row": idx, "error": "Missing or invalid evidence_id/evidence_name or subject_id"})
+                if args.verbose:
+                    print(error(f"  [{idx}/{len(associations)}] Failed: Missing or invalid IDs"))
+                continue
+
+            try:
+                client.associate_evidence(
+                    evidence_id=evidence_id,
+                    subject_id=subject_id,
+                    subject_type=subject_type.upper()
+                )
+                created += 1
+                if args.verbose:
+                    print(success(f"  [{idx}/{len(associations)}] Associated: {evidence_id[:8]}... -> {subject_type} {subject_id}"))
+            except (ValidationError, APIError) as e:
+                failed += 1
+                failed_items.append({"row": idx, "evidence_id": evidence_id, "error": str(e)})
+                if args.verbose:
+                    print(error(f"  [{idx}/{len(associations)}] Failed: {evidence_id[:8]}... - {e}"))
+
+        # Summary
+        print()
+        print(bold("=" * 50))
+        print(bold("Association Summary:"))
+        print(f"  Total:   {len(associations)}")
+        print(f"  Created: {success(str(created))}")
+        if failed > 0:
+            print(f"  Failed:  {error(str(failed))}")
+        print(bold("=" * 50))
+
+        if args.verbose and failed_items:
+            print(error("\nFailed items:"))
+            for item in failed_items:
+                print(f"  - Row {item.get('row')}: {item.get('error')}")
+
+        sys.exit(0 if failed == 0 else 1)
 
     # Determine input source
     evidence_list = []

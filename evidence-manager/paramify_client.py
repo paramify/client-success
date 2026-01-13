@@ -110,7 +110,7 @@ class ParamifyClient:
     """Client for interacting with the Paramify API."""
 
     DEFAULT_TIMEOUT = 30
-    CONNECTION_TEST_TIMEOUT = 5  # Shorter timeout for connection test
+    CONNECTION_TEST_TIMEOUT = 10  # Shorter timeout for connection test
     MAX_RETRIES = 3
     RETRY_DELAY = 1  # seconds
 
@@ -342,6 +342,68 @@ class ParamifyClient:
         # Invalidate cache
         self._evidence_cache = None
         return True
+
+    def associate_evidence(
+        self,
+        evidence_id: str,
+        subject_id: str,
+        subject_type: str = "CONTROL_IMPLEMENTATION",
+        association_type: str = "CONNECT"
+    ) -> Dict[str, Any]:
+        """
+        Associate evidence with a subject (control implementation or solution capability).
+
+        Args:
+            evidence_id: The evidence ID to associate
+            subject_id: The ID of the subject to associate with
+            subject_type: Type of subject - "CONTROL_IMPLEMENTATION" or "SOLUTION_CAPABILITY"
+            association_type: Type of association - typically "CONNECT"
+
+        Returns:
+            API response data
+
+        Raises:
+            APIError: If association fails
+            ValidationError: If invalid subject_type provided
+        """
+        valid_subject_types = ["CONTROL_IMPLEMENTATION", "SOLUTION_CAPABILITY"]
+        if subject_type.upper() not in valid_subject_types:
+            raise ValidationError(f"Invalid subject_type: {subject_type}. Must be one of: {valid_subject_types}")
+
+        payload = {
+            "associationType": association_type.upper(),
+            "subjectType": subject_type.upper(),
+            "subjectId": subject_id
+        }
+
+        return self._request("POST", f"/evidence/{evidence_id}/associate", json=payload)
+
+    # =========================================================================
+    # Projects and Control Implementations
+    # =========================================================================
+
+    def get_projects(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all projects (programs).
+
+        Returns:
+            List of project records with id, name, type, etc.
+        """
+        data = self._request("GET", "/projects")
+        return data.get("projects", [])
+
+    def get_control_implementations(self, project_id: str) -> List[Dict[str, Any]]:
+        """
+        Fetch all control implementations for a project.
+
+        Args:
+            project_id: The project/program ID
+
+        Returns:
+            List of control implementation records with id, name, control, requirement, etc.
+        """
+        data = self._request("GET", f"/projects/{project_id}/control-implementations")
+        return data.get("controlImplementations", [])
 
     # =========================================================================
     # Bulk Operations

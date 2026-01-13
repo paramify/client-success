@@ -4,6 +4,8 @@ Interactive CLI Menu for Paramify Evidence Manager
 """
 
 import sys
+import subprocess
+import platform
 from pathlib import Path
 
 from paramify_client import (
@@ -13,6 +15,7 @@ from paramify_client import (
     ValidationError,
     APIError,
     read_evidence_file,
+    read_csv_file,
     normalize_keys,
     success,
     error,
@@ -26,6 +29,46 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # Initialize global client
 client: ParamifyClient = None
+
+
+def pick_file(title: str = "Select a file", file_types: list = None) -> str:
+    """
+    Open a native file picker dialog using AppleScript on macOS.
+
+    Args:
+        title: Dialog window title
+        file_types: List of file extensions like ["csv", "txt"] (without dots)
+
+    Returns:
+        Selected file path as string, or empty string if cancelled
+    """
+    if platform.system() != "Darwin":
+        return ""
+
+    # Build the AppleScript command
+    script = f'tell application "System Events" to activate\n'
+    script += f'set theFile to choose file with prompt "{title}"'
+
+    # Add file type filter if specified
+    if file_types:
+        types_str = ", ".join([f'"{t}"' for t in file_types])
+        script += f' of type {{{types_str}}}'
+
+    script += f' default location (POSIX file "{SCRIPT_DIR}")\n'
+    script += 'return POSIX path of theFile'
+
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return ""
+    except (subprocess.TimeoutExpired, Exception):
+        return ""
 
 
 def clear_screen():
@@ -58,7 +101,8 @@ def print_menu():
     print("  6. Edit Evidence")
     print("  7. Delete Evidence")
     print("  8. Export Evidence")
-    print("  9. Settings")
+    print("  9. Associate Evidence")
+    print("  10. Settings")
     print("  0. Exit")
     print()
 
@@ -476,6 +520,639 @@ def export_evidence():
         print(error(f"\nError writing file: {e}"))
 
 
+def find_evidence_by_name_or_id(search_term: str) -> dict:
+    """
+    Find evidence by name or ID.
+
+    Args:
+        search_term: Either an evidence ID (UUID format) or evidence name
+
+    Returns:
+        The evidence record if found, None otherwise
+    """
+    # Check if it looks like a UUID (evidence ID)
+    is_uuid = len(search_term) == 36 and search_term.count('-') == 4
+
+    if is_uuid:
+        # Try to fetch directly by ID
+        try:
+            return client.get_evidence(search_term)
+        except APIError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    # Otherwise, search by name
+    try:
+        all_evidence = client.get_all_evidence()
+    except APIError:
+        return None
+
+    # Exact match first (case-insensitive)
+    for ev in all_evidence:
+        if ev.get('name', '').lower() == search_term.lower():
+            return ev
+
+    # Partial match (case-insensitive)
+    matches = []
+    for ev in all_evidence:
+        if search_term.lower() in ev.get('name', '').lower():
+            matches.append(ev)
+
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        # Multiple matches - let user choose
+        print(warning(f"\nMultiple evidence records match '{search_term}':"))
+        for idx, ev in enumerate(matches[:10], 1):  # Show max 10
+            print(f"  {idx}. {ev.get('name')} (ID: {ev.get('id')[:8]}...)")
+        if len(matches) > 10:
+            print(f"  ... and {len(matches) - 10} more")
+
+        try:
+            choice = input("\nSelect number (or 0 to cancel): ").strip()
+            if choice == '0':
+                return None
+            idx = int(choice) - 1
+            if 0 <= idx < len(matches):
+                return matches[idx]
+        except (ValueError, IndexError):
+            pass
+        return None
+
+    return None
+
+
+def find_project_by_name(search_term: str, projects: list) -> dict:
+    """
+    Find a project by name.
+
+    Args:
+        search_term: Project/program name to search for
+        projects: List of projects from API
+
+    Returns:
+        The project record if found, None otherwise
+    """
+    # Exact match first (case-insensitive)
+    for proj in projects:
+        if proj.get('name', '').lower() == search_term.lower():
+            return proj
+
+    # Partial match
+    matches = []
+    for proj in projects:
+        if search_term.lower() in proj.get('name', '').lower():
+            matches.append(proj)
+
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        # Multiple matches - let user choose
+        print(warning(f"\nMultiple programs match '{search_term}':"))
+        for idx, proj in enumerate(matches[:10], 1):
+            print(f"  {idx}. {proj.get('name')} ({proj.get('type', 'N/A')})")
+        if len(matches) > 10:
+            print(f"  ... and {len(matches) - 10} more")
+
+        try:
+            choice = input("\nSelect number (or 0 to cancel): ").strip()
+            if choice == '0':
+                return None
+            idx = int(choice) - 1
+            if 0 <= idx < len(matches):
+                return matches[idx]
+        except (ValueError, IndexError):
+            pass
+        return None
+
+    return None
+
+
+def find_control_implementation(control_name: str, control_impls: list) -> dict:
+    """
+    Find a control implementation by control ID (e.g., "AC-1").
+
+    Args:
+        control_name: Control ID like "AC-1" or "AC-1 Part a1"
+        control_impls: List of control implementations from API
+
+    Returns:
+        The control implementation record if found, None otherwise
+    """
+    control_name_lower = control_name.lower().strip()
+
+    # First, try exact match on control field
+    for ci in control_impls:
+        if ci.get('control', '').lower() == control_name_lower:
+            return ci
+
+    # Try matching control + requirement (e.g., "AC-1 Part a1")
+    for ci in control_impls:
+        control = ci.get('control', '').lower()
+        requirement = ci.get('requirement', '').lower()
+        full_name = f"{control} {requirement}".strip()
+        if full_name == control_name_lower:
+            return ci
+
+    # Partial match on control
+    matches = []
+    for ci in control_impls:
+        control = ci.get('control', '').lower()
+        if control_name_lower in control or control in control_name_lower:
+            matches.append(ci)
+
+    if len(matches) == 1:
+        return matches[0]
+    elif len(matches) > 1:
+        # Multiple matches - let user choose
+        print(warning(f"\nMultiple control implementations match '{control_name}':"))
+        for idx, ci in enumerate(matches[:10], 1):
+            ctrl = ci.get('control', 'N/A')
+            req = ci.get('requirement', '')
+            name = ci.get('name', 'N/A')
+            display = f"{ctrl} {req}".strip() if req else ctrl
+            print(f"  {idx}. {display} - {name[:40]}...")
+        if len(matches) > 10:
+            print(f"  ... and {len(matches) - 10} more")
+
+        try:
+            choice = input("\nSelect number (or 0 to cancel): ").strip()
+            if choice == '0':
+                return None
+            idx = int(choice) - 1
+            if 0 <= idx < len(matches):
+                return matches[idx]
+        except (ValueError, IndexError):
+            pass
+        return None
+
+    return None
+
+
+def associate_evidence_interactive():
+    """Associate evidence with control implementations using simplified workflow."""
+    print("\n" + bold("=" * 60))
+    print(bold("ASSOCIATE EVIDENCE"))
+    print(bold("=" * 60))
+
+    print("\nAssociation options:")
+    print("  1. Associate Single Evidence (by program, control, evidence name)")
+    print("  2. Associate from CSV File (program_name, control, evidence_name)")
+    print("  3. Associate by IDs (manual entry)")
+    print("  0. Cancel")
+
+    choice = input("\nSelect an option: ").strip()
+
+    if choice == '0':
+        print(warning("Cancelled."))
+        return
+
+    if choice == '1':
+        # Single association mode - simplified workflow
+        print("\n" + bold("-" * 60))
+        print(bold("SINGLE EVIDENCE ASSOCIATION"))
+        print("-" * 60)
+
+        # Step 1: Select program
+        print(info("\nFetching programs..."))
+        try:
+            projects = client.get_projects()
+        except APIError as e:
+            print(error(f"Failed to fetch programs: {e}"))
+            return
+
+        if not projects:
+            print(warning("No programs found in your workspace."))
+            return
+
+        print(f"\nAvailable Programs ({len(projects)}):")
+        for idx, proj in enumerate(projects, 1):
+            print(f"  {idx}. {proj.get('name')} ({proj.get('type', 'N/A')})")
+
+        prog_input = input("\nEnter program name or number: ").strip()
+        if not prog_input:
+            print(warning("Cancelled."))
+            return
+
+        # Check if user entered a number
+        try:
+            prog_idx = int(prog_input) - 1
+            if 0 <= prog_idx < len(projects):
+                selected_project = projects[prog_idx]
+            else:
+                print(error("Invalid selection."))
+                return
+        except ValueError:
+            # Search by name
+            selected_project = find_project_by_name(prog_input, projects)
+
+        if not selected_project:
+            print(error(f"Program not found: {prog_input}"))
+            return
+
+        project_id = selected_project.get('id')
+        print(success(f"Selected program: {selected_project.get('name')}"))
+
+        # Step 2: Select control implementation
+        print(info("\nFetching control implementations..."))
+        try:
+            control_impls = client.get_control_implementations(project_id)
+        except APIError as e:
+            print(error(f"Failed to fetch control implementations: {e}"))
+            return
+
+        if not control_impls:
+            print(warning("No control implementations found for this program."))
+            return
+
+        print(f"\nFound {len(control_impls)} control implementation(s).")
+        print("Enter a control ID (e.g., 'AC-1') or browse:")
+        print("  Type 'list' to see all controls")
+
+        control_input = input("\nEnter control ID: ").strip()
+        if not control_input:
+            print(warning("Cancelled."))
+            return
+
+        if control_input.lower() == 'list':
+            # List all controls
+            print(f"\nControl Implementations ({len(control_impls)}):")
+            for idx, ci in enumerate(control_impls[:50], 1):  # Limit to 50
+                ctrl = ci.get('control', 'N/A')
+                req = ci.get('requirement', '')
+                name = ci.get('name', 'N/A')
+                display = f"{ctrl} {req}".strip() if req else ctrl
+                print(f"  {idx}. {display} - {name[:40]}...")
+            if len(control_impls) > 50:
+                print(f"  ... and {len(control_impls) - 50} more")
+
+            control_input = input("\nEnter control ID or number: ").strip()
+            if not control_input:
+                print(warning("Cancelled."))
+                return
+
+            # Check if number
+            try:
+                ci_idx = int(control_input) - 1
+                if 0 <= ci_idx < len(control_impls):
+                    selected_control = control_impls[ci_idx]
+                else:
+                    print(error("Invalid selection."))
+                    return
+            except ValueError:
+                selected_control = find_control_implementation(control_input, control_impls)
+        else:
+            selected_control = find_control_implementation(control_input, control_impls)
+
+        if not selected_control:
+            print(error(f"Control implementation not found: {control_input}"))
+            return
+
+        control_impl_id = selected_control.get('id')
+        ctrl_display = f"{selected_control.get('control', '')} {selected_control.get('requirement', '')}".strip()
+        print(success(f"Selected control: {ctrl_display} - {selected_control.get('name', 'N/A')[:40]}"))
+
+        # Step 3: Select evidence
+        print(info("\nSearching for evidence..."))
+        evidence_input = input("\nEnter evidence name: ").strip()
+        if not evidence_input:
+            print(warning("Cancelled."))
+            return
+
+        evidence = find_evidence_by_name_or_id(evidence_input)
+        if not evidence:
+            print(error(f"Evidence not found: {evidence_input}"))
+            return
+
+        evidence_id = evidence.get('id')
+        print(success(f"Found evidence: {evidence.get('name')}"))
+
+        # Confirm
+        print(info("\n" + "-" * 60))
+        print(bold("Association Summary:"))
+        print(f"  Program:  {selected_project.get('name')}")
+        print(f"  Control:  {ctrl_display}")
+        print(f"  Evidence: {evidence.get('name')}")
+        print("-" * 60)
+
+        confirm = input("\nCreate this association? (y/n): ").strip().lower()
+        if confirm != 'y':
+            print(warning("Cancelled."))
+            return
+
+        # Create association
+        try:
+            client.associate_evidence(
+                evidence_id=evidence_id,
+                subject_id=control_impl_id,
+                subject_type="CONTROL_IMPLEMENTATION"
+            )
+            print(success("\nAssociation created successfully!"))
+        except (ValidationError, APIError) as e:
+            print(error(f"\nFailed to create association: {e}"))
+
+    elif choice == '2':
+        # Bulk association from CSV - simplified format
+        print("\n" + bold("-" * 60))
+        print(bold("BULK ASSOCIATION FROM CSV"))
+        print("-" * 60)
+
+        print("\nCSV file format (columns):")
+        print("  program_name  - Name of the program (e.g., 'FedRAMP Rev 5')")
+        print("  evidence_name - Name of the evidence")
+        print("  control       - Control ID (e.g., 'AC-1')")
+        print("\nExample:")
+        print("  program_name,evidence_name,control")
+        print("  FedRAMP Rev 5,User Access Review,AC-1")
+        print("  FedRAMP Rev 5,Account Management Policy,AC-2")
+
+        # Use file picker on macOS, otherwise fall back to manual entry
+        if platform.system() == "Darwin":
+            print(info("\nOpening file picker..."))
+            file_path = pick_file(
+                title="Select CSV File for Bulk Association",
+                file_types=["csv"]
+            )
+            if file_path:
+                print(f"Selected: {file_path}")
+        else:
+            file_path = input("\nEnter CSV file path: ").strip()
+
+        if not file_path:
+            print(warning("Cancelled."))
+            return
+
+        try:
+            associations = read_csv_file(Path(file_path))
+
+            if not associations:
+                print(warning("No associations found in file."))
+                return
+
+            print(f"\nFound {bold(str(len(associations)))} association(s) to process")
+
+            # Preview first few
+            print("\nPreview:")
+            for idx, assoc in enumerate(associations[:3], 1):
+                prog = assoc.get("program_name", assoc.get("programname", "N/A"))
+                ctrl = assoc.get("control", "N/A")
+                ev = assoc.get("evidence_name", assoc.get("evidencename", "N/A"))
+                print(f"  {idx}. {prog} / {ctrl} / {ev}")
+            if len(associations) > 3:
+                print(f"  ... and {len(associations) - 3} more")
+
+            confirm = input("\nProceed with associations? (y/n): ").strip().lower()
+            if confirm != 'y':
+                print(warning("Cancelled."))
+                return
+
+            # Pre-fetch data for lookups
+            print(info("\nFetching data for lookups..."))
+
+            # Fetch all evidence
+            try:
+                all_evidence = client.get_all_evidence()
+                evidence_by_name = {}
+                for ev in all_evidence:
+                    name = ev.get('name', '').lower()
+                    if name:
+                        evidence_by_name[name] = ev
+                print(f"  Loaded {len(all_evidence)} evidence record(s)")
+            except APIError as e:
+                print(error(f"Failed to fetch evidence: {e}"))
+                return
+
+            # Fetch all projects
+            try:
+                projects = client.get_projects()
+                projects_by_name = {}
+                for proj in projects:
+                    name = proj.get('name', '').lower()
+                    if name:
+                        projects_by_name[name] = proj
+                print(f"  Loaded {len(projects)} program(s)")
+            except APIError as e:
+                print(error(f"Failed to fetch programs: {e}"))
+                return
+
+            # Cache for control implementations by project
+            control_impls_cache = {}
+
+            # Process associations
+            created = 0
+            failed = 0
+            failed_items = []
+
+            for idx, assoc in enumerate(associations, 1):
+                program_name = assoc.get("program_name", assoc.get("programname", ""))
+                control_name = assoc.get("control", "")
+                evidence_name = assoc.get("evidence_name", assoc.get("evidencename", ""))
+
+                row_label = f"[{idx}/{len(associations)}]"
+
+                # Resolve program
+                project = projects_by_name.get(program_name.lower())
+                if not project:
+                    # Try partial match
+                    for name, proj in projects_by_name.items():
+                        if program_name.lower() in name:
+                            project = proj
+                            break
+
+                if not project:
+                    failed += 1
+                    failed_items.append({"row": idx, "error": f"Program not found: {program_name}"})
+                    print(error(f"  {row_label} Failed: Program not found: {program_name}"))
+                    continue
+
+                project_id = project.get('id')
+
+                # Get control implementations for this project (cache)
+                if project_id not in control_impls_cache:
+                    try:
+                        control_impls_cache[project_id] = client.get_control_implementations(project_id)
+                    except APIError as e:
+                        failed += 1
+                        failed_items.append({"row": idx, "error": f"Failed to fetch controls: {e}"})
+                        print(error(f"  {row_label} Failed: Could not fetch controls for {program_name}"))
+                        continue
+
+                control_impls = control_impls_cache[project_id]
+
+                # Resolve control
+                control_impl = None
+                control_name_lower = control_name.lower().strip()
+
+                for ci in control_impls:
+                    # Match on control field
+                    if ci.get('control', '').lower() == control_name_lower:
+                        control_impl = ci
+                        break
+                    # Match on control + requirement
+                    full_name = f"{ci.get('control', '')} {ci.get('requirement', '')}".lower().strip()
+                    if full_name == control_name_lower:
+                        control_impl = ci
+                        break
+
+                if not control_impl:
+                    # Try partial match
+                    for ci in control_impls:
+                        if control_name_lower in ci.get('control', '').lower():
+                            control_impl = ci
+                            break
+
+                if not control_impl:
+                    failed += 1
+                    failed_items.append({"row": idx, "error": f"Control not found: {control_name}"})
+                    print(error(f"  {row_label} Failed: Control not found: {control_name}"))
+                    continue
+
+                control_impl_id = control_impl.get('id')
+
+                # Resolve evidence
+                evidence = evidence_by_name.get(evidence_name.lower())
+                if not evidence:
+                    # Try partial match
+                    for name, ev in evidence_by_name.items():
+                        if evidence_name.lower() in name:
+                            evidence = ev
+                            break
+
+                if not evidence:
+                    failed += 1
+                    failed_items.append({"row": idx, "error": f"Evidence not found: {evidence_name}"})
+                    print(error(f"  {row_label} Failed: Evidence not found: {evidence_name}"))
+                    continue
+
+                evidence_id = evidence.get('id')
+
+                # Create association
+                try:
+                    client.associate_evidence(
+                        evidence_id=evidence_id,
+                        subject_id=control_impl_id,
+                        subject_type="CONTROL_IMPLEMENTATION"
+                    )
+                    created += 1
+                    ctrl_display = control_impl.get('control', control_name)
+                    print(success(f"  {row_label} Associated: {evidence_name[:20]}... -> {ctrl_display}"))
+                except (ValidationError, APIError) as e:
+                    failed += 1
+                    failed_items.append({"row": idx, "error": str(e)})
+                    print(error(f"  {row_label} Failed: {e}"))
+
+            # Summary
+            print("\n" + bold("=" * 60))
+            print(bold("Association Summary:"))
+            print(f"  Total:   {len(associations)}")
+            print(f"  Created: {success(str(created))}")
+            if failed > 0:
+                print(f"  Failed:  {error(str(failed))}")
+            print(bold("=" * 60))
+
+        except FileNotFoundError:
+            print(error(f"\nFile not found: {file_path}"))
+        except Exception as e:
+            print(error(f"\nError: {e}"))
+
+    elif choice == '3':
+        # Manual ID entry mode (original functionality)
+        print("\n" + bold("-" * 60))
+        print(bold("ASSOCIATE BY IDs"))
+        print("-" * 60)
+
+        # Get evidence ID or name
+        print("\nYou can enter either an Evidence ID or Evidence Name.")
+        search_term = input("Enter Evidence ID or Name: ").strip()
+        if not search_term:
+            print(warning("Cancelled."))
+            return
+
+        # Find evidence by name or ID
+        print(info("Searching for evidence..."))
+        evidence = find_evidence_by_name_or_id(search_term)
+
+        if not evidence:
+            print(error(f"Evidence not found: {search_term}"))
+            return
+
+        evidence_id = evidence.get('id')
+        print(success(f"Found evidence: {evidence.get('name')} (ID: {evidence_id[:8]}...)"))
+
+        # Get subject type
+        print("\nSubject Type:")
+        print("  1. Control Implementation (default)")
+        print("  2. Solution Capability")
+
+        type_choice = input("\nSelect subject type [1]: ").strip()
+        if type_choice == '2':
+            subject_type = "SOLUTION_CAPABILITY"
+        else:
+            subject_type = "CONTROL_IMPLEMENTATION"
+
+        # Get subject IDs
+        print(f"\nEnter {subject_type} ID(s) to associate with.")
+        print("You can enter multiple IDs separated by spaces or commas.")
+        subject_input = input("\nSubject ID(s): ").strip()
+
+        if not subject_input:
+            print(warning("Cancelled."))
+            return
+
+        # Parse subject IDs (split by space or comma)
+        subject_ids = [s.strip() for s in subject_input.replace(',', ' ').split() if s.strip()]
+
+        if not subject_ids:
+            print(warning("No valid subject IDs provided."))
+            return
+
+        # Confirm
+        print(info(f"\nWill associate evidence '{evidence.get('name', evidence_id)}' with:"))
+        print(f"  Subject Type: {subject_type}")
+        print(f"  Subject IDs:  {len(subject_ids)} ID(s)")
+        for sid in subject_ids[:5]:  # Show first 5
+            print(f"    - {sid}")
+        if len(subject_ids) > 5:
+            print(f"    ... and {len(subject_ids) - 5} more")
+
+        confirm = input("\nProceed with association? (y/n): ").strip().lower()
+        if confirm != 'y':
+            print(warning("Cancelled."))
+            return
+
+        # Process associations
+        created = 0
+        failed = 0
+        failed_items = []
+
+        for idx, subject_id in enumerate(subject_ids, 1):
+            try:
+                client.associate_evidence(
+                    evidence_id=evidence_id,
+                    subject_id=subject_id,
+                    subject_type=subject_type
+                )
+                created += 1
+                print(success(f"  [{idx}/{len(subject_ids)}] Associated: {subject_id}"))
+            except (ValidationError, APIError) as e:
+                failed += 1
+                failed_items.append({"subject_id": subject_id, "error": str(e)})
+                print(error(f"  [{idx}/{len(subject_ids)}] Failed: {subject_id} - {e}"))
+
+        # Summary
+        print("\n" + bold("=" * 60))
+        print(bold("Association Summary:"))
+        print(f"  Total:   {len(subject_ids)}")
+        print(f"  Created: {success(str(created))}")
+        if failed > 0:
+            print(f"  Failed:  {error(str(failed))}")
+        print(bold("=" * 60))
+
+    else:
+        print(error("Invalid option."))
+
+
 def settings():
     """View and update API settings."""
     global client
@@ -628,6 +1305,8 @@ def main_loop():
         elif choice == '8':
             export_evidence()
         elif choice == '9':
+            associate_evidence_interactive()
+        elif choice == '10':
             settings()
         elif choice == '0':
             print(success("\nGoodbye!"))
